@@ -282,6 +282,9 @@ main{position:absolute;inset:0;overflow:hidden}canvas{display:block;width:100%;h
 <div class="card" id="screenshotListCard">
 <div id="screenshotList" class="mini">No screenshots captured yet.</div>
 </div>
+<div class="card">
+<button class="primary" id="exportPdfFromScreenshotsBtn">Export PDF</button>
+</div>
 </div>
 
 <div class="panel left" id="panelSettings">
@@ -599,17 +602,30 @@ function parseArchD(text,fileName){
   const lines=String(text||'').replace(/\r/g,'').split('\n');
   const fileDate=extractDateFromFileName(fileName);
 
+  const flushCurrent=()=>{
+    if(cur&&cur.points.length)out.push(finalise(cur));
+    cur=null;
+  };
+
   for(const line of lines){
     const t=line.trim();
     if(!t)continue;
 
     if(t.startsWith('POLHED:')){
-      if(cur&&cur.points.length)out.push(finalise(cur));
-
+      // FMT_4 files repeat the same POLHED name twice — first with 4 dummy
+      // z=5000000 sentinel/extent points then an End: record, then the real
+      // survey points. Flush on every POLHED so the sentinel block becomes a
+      // zero-point string (filtered below) and the real block is kept clean.
+      flushCurrent();
       const rawName=t.slice(7).trim();
       const name=cleanArchStringName(rawName,`String ${out.length+1}`);
-
       cur={file:fileName,name,date:fileDate,points:[],visible:true};
+      continue;
+    }
+
+    // FMT_4 End: record — close the current string exactly like end-of-file.
+    if(t.startsWith('End:')){
+      flushCurrent();
       continue;
     }
 
@@ -617,12 +633,18 @@ function parseArchD(text,fileName){
       if(!cur)cur={file:fileName,name:`String ${out.length+1}`,date:fileDate,points:[],visible:true};
       const nums=t.match(/[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?/g);
       if(nums&&nums.length>=4){
-        cur.points.push({x:+nums[1],y:+nums[2],z:+nums[3]});
+        const z=+nums[3];
+        // Vulcan FMT_4 uses z=5000000 as a sentinel/extent placeholder —
+        // never a real survey point. Any |z| >= 1,000,000 is safely outside
+        // any real mine-survey AHD range.
+        if(Math.abs(z)<1000000){
+          cur.points.push({x:+nums[1],y:+nums[2],z});
+        }
       }
     }
   }
 
-  if(cur&&cur.points.length)out.push(finalise(cur));
+  flushCurrent();
   return out;
 }
 
@@ -2936,11 +2958,11 @@ function buildMatrixRows(){
     if(matchedStringName)byString.set(`${scope}::${normName(matchedStringName)}`,row);
   });
   return strings.map((s,i)=>{
-    const m=s.metrics, calcRun=ceilTo(m.run3d,200), calcRise=ceilTo(Math.max(m.rise,m.algorithmRise),10);
+    const m=s.metrics, calcRun=ceilTo(m.run3d,200), calcRise=ceilTo(Math.max(m.rise,m.algorithmRise),10), rawRise=Math.max(m.rise,m.algorithmRise);
     const scope=dateScopeKey(s.date);
     const buma=byString.get(`${scope}::${normName(s.name)}`);
     const sheetRun=buma?toNumber(buma.run):NaN, sheetRise=buma?toNumber(buma.rise):NaN;
-    return {i,file:s.file,name:s.name,date:s.date,excelRow:buma?buma.pit:'',pitName:buma?buma.pit:'',calcRun,calcRise,sheetRun,sheetRise,runDiff:Number.isFinite(sheetRun)?calcRun-sheetRun:NaN,riseDiff:Number.isFinite(sheetRise)?calcRise-sheetRise:NaN,match:!!buma};
+    return {i,file:s.file,name:s.name,date:s.date,excelRow:buma?buma.pit:'',pitName:buma?buma.pit:'',calcRun,calcRise,rawRise,sheetRun,sheetRise,runDiff:Number.isFinite(sheetRun)?calcRun-sheetRun:NaN,riseDiff:Number.isFinite(sheetRise)?calcRise-sheetRise:NaN,match:!!buma};
   });
 }
 function getDuplicateBumaPits(){
@@ -3138,7 +3160,7 @@ function renderDayTable(){
         <td>${d.matched}/${d.stringCount}</td>
         <td class="${d.fails>0?'bad':'good'}">${d.fails}</td>
         <td class="${d.unmatchedCount>0?'bad':'good'}">${d.unmatchedCount}${d.unmatchedPits.length?' ('+d.unmatchedPits.map(p=>esc(p.pit)).join(', ')+')':''}</td>
-        <td class="${d.sanityFails>0?'warn':'good'}">${d.sanityFails}</td>
+        <td class="${d.sanityFails>0?'warn sanityCell':'good'}" data-scope="${esc(d.scope)}" style="${d.sanityFails>0?'cursor:pointer;text-decoration:underline dotted;':''}">${d.sanityFails>0?`${d.sanityFails} ▾`:d.sanityFails}</td>
       </tr>`;
     }).join('')+'</tbody>';
   table.querySelectorAll('.dayVisToggle').forEach(cb=>{
@@ -3148,10 +3170,77 @@ function renderDayTable(){
     });
   });
   table.querySelectorAll('.dayRow').forEach(tr=>{
-    tr.addEventListener('click',()=>{
+    tr.addEventListener('click',e=>{
+      // If clicking the sanity cell, expand/collapse instead of opening matrix
+      if(e.target.classList.contains('sanityCell')||e.target.closest('.sanityCell')){
+        return; // handled by sanityCell listener below
+      }
       document.getElementById('dayDrawer').classList.add('hidden');(function(){var b=document.getElementById('railBtnFit');if(b)b.style.display='';})();
       showTable('matrix');
       document.getElementById('drawerExports').classList.remove('hidden');
+    });
+  });
+
+  // Sanity-cell click: toggle an expanded detail row beneath showing
+  // all failing strings for that day with their worst segments listed.
+  table.querySelectorAll('.sanityCell').forEach(td=>{
+    td.addEventListener('click',e=>{
+      e.stopPropagation();
+      const scope=td.dataset.scope;
+      const existingExpand=table.querySelector(`.sanityExpand[data-scope="${scope}"]`);
+      if(existingExpand){
+        existingExpand.remove();
+        td.textContent=td.textContent.replace('▴','▾');
+        return;
+      }
+      td.innerHTML=td.innerHTML.replace('▾','▴');
+      const colSpan=heads.length;
+      const threshold=getSanityGradientThreshold();
+      const failingStrings=strings.filter(s=>dateScopeKey(s.date)===scope&&s.metrics&&s.metrics.sanityFail);
+      // Build per-segment detail for each failing string
+      const rows=failingStrings.map(s=>{
+        const segs=[];
+        for(let i=1;i<s.points.length;i++){
+          const a=s.points[i-1], p=s.points[i];
+          const dx=p.x-a.x, dy=p.y-a.y, dz=p.z-a.z;
+          const dist2d=Math.hypot(dx,dy);
+          if(dist2d<=0)continue;
+          const grade=Math.abs(dz)/dist2d*100;
+          if(grade>=threshold)segs.push({idx:i,grade,dz,dist2d,fromRL:a.z,toRL:p.z});
+        }
+        return {name:s.name,segs};
+      });
+      const expandHTML=`<tr class="sanityExpand" data-scope="${esc(scope)}">
+        <td colspan="${colSpan}" style="padding:0;background:#0a1220;border-top:2px solid rgba(251,146,60,.4);">
+          <div style="padding:12px 16px;">
+            <div style="font-weight:700;font-size:12px;color:#fb923c;margin-bottom:10px;">Sanity fail detail — segments exceeding ${threshold}% grade</div>
+            ${rows.map(r=>`
+              <div style="margin-bottom:10px;">
+                <div style="font-weight:700;font-size:11.5px;color:#e7f0fb;margin-bottom:4px;">⚠ ${esc(r.name)} — ${r.segs.length} failing segment${r.segs.length===1?'':'s'}</div>
+                <table style="width:100%;border-collapse:collapse;font-size:11px;">
+                  <thead><tr style="color:#8fa3bd;">
+                    <th style="text-align:left;padding:3px 8px;border-bottom:1px solid rgba(143,163,189,.2)">Seg</th>
+                    <th style="text-align:right;padding:3px 8px;border-bottom:1px solid rgba(143,163,189,.2)">Grade %</th>
+                    <th style="text-align:right;padding:3px 8px;border-bottom:1px solid rgba(143,163,189,.2)">dZ (m)</th>
+                    <th style="text-align:right;padding:3px 8px;border-bottom:1px solid rgba(143,163,189,.2)">Horiz dist (m)</th>
+                    <th style="text-align:right;padding:3px 8px;border-bottom:1px solid rgba(143,163,189,.2)">From RL</th>
+                    <th style="text-align:right;padding:3px 8px;border-bottom:1px solid rgba(143,163,189,.2)">To RL</th>
+                  </tr></thead>
+                  <tbody>${r.segs.map(seg=>`<tr style="color:#fde68a;">
+                    <td style="padding:3px 8px">${seg.idx-1}→${seg.idx}</td>
+                    <td style="text-align:right;padding:3px 8px;font-weight:700">${seg.grade.toFixed(1)}%</td>
+                    <td style="text-align:right;padding:3px 8px">${seg.dz>=0?'+':''}${seg.dz.toFixed(3)}</td>
+                    <td style="text-align:right;padding:3px 8px">${seg.dist2d.toFixed(2)}</td>
+                    <td style="text-align:right;padding:3px 8px">${seg.fromRL.toFixed(3)}</td>
+                    <td style="text-align:right;padding:3px 8px">${seg.toRL.toFixed(3)}</td>
+                  </tr>`).join('')}</tbody>
+                </table>
+              </div>`).join('')}
+          </div>
+        </td>
+      </tr>`;
+      const parentRow=td.closest('tr');
+      parentRow.insertAdjacentHTML('afterend',expandHTML);
     });
   });
 }
@@ -3207,7 +3296,7 @@ function renderMatrixTable(){
   const matched=rows.filter(r=>r.match).length;
   if(activeTable==='matrix')document.getElementById('tableCount').textContent=`${matched}/${rows.length} matched${bumaFileNames.size?' · '+getBumaFileLabel():''}`;
   const heads=[['date','Date'],['file','File'],['name','String'],['excelRow','BUMA Pit'],['calcRun','Run (Survey)'],['sheetRun','Run (BUMA)'],['runDiff','Run diff'],['calcRise','Rise (Survey)'],['sheetRise','Rise (BUMA)'],['riseDiff','Rise diff']];
-  table.innerHTML='<thead><tr>'+heads.map(([k,t])=>`<th data-k="${k}">${t}${matrixSortState.key===k?(matrixSortState.dir>0?' ▲':' ▼'):''}</th>`).join('')+'</tr></thead><tbody>'+rows.map(r=>`<tr><td>${esc(formatIsoDate(r.date))}</td><td>${esc(r.file)}</td><td>${esc(r.name)}</td><td>${r.excelRow||'<span class="muted">No match</span>'}</td><td>${fmt(r.calcRun,0)}</td><td>${fmt(r.sheetRun,0)}</td><td class="${Number.isFinite(r.runDiff)?diffClass(r.runDiff):''}">${fmt(r.runDiff,0)}</td><td>${fmt(r.calcRise,0)}</td><td>${fmt(r.sheetRise,0)}</td><td class="${Number.isFinite(r.riseDiff)?diffClass(r.riseDiff):''}">${fmt(r.riseDiff,0)}</td></tr>`).join('')+'</tbody>';
+  table.innerHTML='<thead><tr>'+heads.map(([k,t])=>`<th data-k="${k}">${t}${matrixSortState.key===k?(matrixSortState.dir>0?' ▲':' ▼'):''}</th>`).join('')+'</tr></thead><tbody>'+rows.map(r=>`<tr><td>${esc(formatIsoDate(r.date))}</td><td>${esc(r.file)}</td><td>${esc(r.name)}</td><td>${r.excelRow||'<span class="muted">No match</span>'}</td><td>${fmt(r.calcRun,0)}</td><td>${fmt(r.sheetRun,0)}</td><td class="${Number.isFinite(r.runDiff)?diffClass(r.runDiff):''}">${fmt(r.runDiff,0)}</td><td>${fmt(r.calcRise,0)}<span class="muted" style="font-weight:400;font-size:10px;margin-left:4px">(${fmt(r.rawRise,1)})</span></td><td>${fmt(r.sheetRise,0)}</td><td class="${Number.isFinite(r.riseDiff)?diffClass(r.riseDiff):''}">${fmt(r.riseDiff,0)}</td></tr>`).join('')+'</tbody>';
   table.querySelectorAll('th').forEach(th=>th.addEventListener('click',()=>{const k=th.dataset.k;if(matrixSortState.key===k)matrixSortState.dir*=-1;else matrixSortState={key:k,dir:1};renderMatrixTable();}));
 }
 async function extractPdfRows(file){
@@ -3629,7 +3718,7 @@ function exportMatrixPdf(){
   // Matrix table page(s)
   addTitleBand('BUMA Haul Validation Summary', `${matched}/${rows.length} strings matched · ${getBumaFileLabel({compact:true})||'No BUMA PDF loaded'}`);
   doc.setFontSize(7.2); rgb(slate);
-  doc.text('Run (Survey) = calculated 3D length rounded up to nearest 200 m. Rise (Survey) = greater of Max rise / Algorithm rise rounded up to nearest 10 m. BUMA figures read directly from the Daily Haul Profile PDF.',12,27);
+  doc.text('Run (Survey) = calculated 3D length rounded up to nearest 200 m. Rise (Survey) = greater of Max rise / Algorithm rise rounded up to nearest 10 m, with raw unrounded value in brackets. BUMA figures read directly from the Daily Haul Profile PDF.',12,27);
 
   const body=rows.map(r=>[
     r.file,
@@ -3637,7 +3726,7 @@ function exportMatrixPdf(){
     fmt(r.calcRun,0),
     fmt(r.sheetRun,0),
     fmt(r.runDiff,0),
-    fmt(r.calcRise,0),
+    fmt(r.calcRise,0)+(Number.isFinite(r.rawRise)?` (${fmt(r.rawRise,1)})`:``),
     fmt(r.sheetRise,0),
     fmt(r.riseDiff,0)
   ]);
@@ -3961,7 +4050,8 @@ document.getElementById('sanityFailBtn').addEventListener('click',()=>{
   draw();
 });
 
-document.getElementById('clearBtn').addEventListener('click',()=>{strings=[];filesLoaded.clear();bumaRows=[];bumaFileNames=new Set();manualMatches={};document.getElementById('excelStatus').textContent='No BUMA PDF loaded.';renderManualMatchUI();renderDayTable();refresh(false);updateColourModeDescription();});document.getElementById('exportMatrixPdfBtn').addEventListener('click',exportMatrixPdf);if(typeof ResizeObserver!=='undefined'){const td=document.getElementById('tableDrawer');if(td)new ResizeObserver(()=>{draw();}).observe(td);const sd=document.getElementById('sectionDrawer');if(sd)new ResizeObserver(()=>{resizeSectionCanvas();}).observe(sd);const vp=document.getElementById('viewport3d');if(vp)new ResizeObserver(()=>{resize();}).observe(vp);}const sectionCanvas=document.getElementById('sectionCanvas');if(sectionCanvas){sectionCanvas.addEventListener('mousemove',e=>{const s=strings[selectedStringIndex];const h=document.getElementById('sectionHover');if(!s||!s.points||s.points.length<2){h.classList.add('hidden');return;}const {chain,z}=getProfileData(s);const rect=sectionCanvas.getBoundingClientRect();const x=e.clientX-rect.left;const w=sectionCanvas.clientWidth,padL=62,padR=24;const maxX=chain.at(-1)||1;const ch=Math.max(0,Math.min(maxX,(x-padL)/(w-padL-padR)*maxX));let idx=0;for(let i=1;i<chain.length;i++){if(Math.abs(chain[i]-ch)<Math.abs(chain[idx]-ch))idx=i;}h.classList.remove('hidden');h.textContent=`Pt ${idx} · Chain ${fmt(chain[idx],2)} m · RL ${fmt(z[idx],3)}`;});sectionCanvas.addEventListener('mouseleave',()=>document.getElementById('sectionHover').classList.add('hidden'));}
+document.getElementById('clearBtn').addEventListener('click',()=>{strings=[];filesLoaded.clear();bumaRows=[];bumaFileNames=new Set();manualMatches={};document.getElementById('excelStatus').textContent='No BUMA PDF loaded.';renderManualMatchUI();renderDayTable();refresh(false);updateColourModeDescription();});document.getElementById('exportMatrixPdfBtn').addEventListener('click',exportMatrixPdf);
+document.getElementById('exportPdfFromScreenshotsBtn')?.addEventListener('click',exportMatrixPdf);if(typeof ResizeObserver!=='undefined'){const td=document.getElementById('tableDrawer');if(td)new ResizeObserver(()=>{draw();}).observe(td);const sd=document.getElementById('sectionDrawer');if(sd)new ResizeObserver(()=>{resizeSectionCanvas();}).observe(sd);const vp=document.getElementById('viewport3d');if(vp)new ResizeObserver(()=>{resize();}).observe(vp);}const sectionCanvas=document.getElementById('sectionCanvas');if(sectionCanvas){sectionCanvas.addEventListener('mousemove',e=>{const s=strings[selectedStringIndex];const h=document.getElementById('sectionHover');if(!s||!s.points||s.points.length<2){h.classList.add('hidden');return;}const {chain,z}=getProfileData(s);const rect=sectionCanvas.getBoundingClientRect();const x=e.clientX-rect.left;const w=sectionCanvas.clientWidth,padL=62,padR=24;const maxX=chain.at(-1)||1;const ch=Math.max(0,Math.min(maxX,(x-padL)/(w-padL-padR)*maxX));let idx=0;for(let i=1;i<chain.length;i++){if(Math.abs(chain[i]-ch)<Math.abs(chain[idx]-ch))idx=i;}h.classList.remove('hidden');h.textContent=`Pt ${idx} · Chain ${fmt(chain[idx],2)} m · RL ${fmt(z[idx],3)}`;});sectionCanvas.addEventListener('mouseleave',()=>document.getElementById('sectionHover').classList.add('hidden'));}
 document.getElementById('railBtnFit').addEventListener('click',fit);
 
 /* ===================== Report Screenshots (user-captured, for PDF) ===================== */
