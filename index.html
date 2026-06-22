@@ -93,22 +93,25 @@ main{position:absolute;inset:0;overflow:hidden}canvas{display:block;width:100%;h
 /* ---- Landing / drag-drop screen ---- */
 .landing{position:absolute;inset:0;z-index:20;display:flex;flex-direction:column;align-items:center;justify-content:center;background:radial-gradient(circle at 50% 20%,#0e1d33,#050b16 70%);padding:24px;text-align:center}
 .landing.hidden{display:none}
-.landing h1{font-size:26px;margin:0 0 8px}
+.landing-logo{font-size:11px;font-weight:700;letter-spacing:.16em;text-transform:uppercase;color:#3a6a9a;margin-bottom:14px}
+.landing h1{font-size:32px;font-weight:800;margin:0 0 44px;color:#e5eefb;letter-spacing:-.01em}
+.landing h1 span{color:#38bdf8}
 .landing .sub{font-size:13px;max-width:620px;margin:0 auto 30px}
-.dropGrid{display:grid;grid-template-columns:repeat(3,minmax(220px,300px));gap:20px;width:100%;max-width:1000px}
-@media (max-width:900px){.dropGrid{grid-template-columns:1fr;max-width:380px}}
-.dropZone{position:relative;border:2px dashed var(--line);border-radius:20px;padding:28px 18px;background:rgba(16,29,49,.55);cursor:pointer;transition:border-color .15s,background .15s,transform .15s}
-.dropZone:hover{border-color:#3a557a;transform:translateY(-2px)}
+.dropGrid{display:grid;grid-template-columns:repeat(3,minmax(220px,300px));gap:16px;width:100%;max-width:980px}
+@media (max-width:900px){.dropGrid{grid-template-columns:1fr;max-width:360px}}
+.dropZone{position:relative;border:1px solid rgba(56,189,248,.18);border-radius:20px;padding:32px 20px 24px;background:rgba(10,20,40,.8);cursor:pointer;transition:border-color .2s,background .2s,transform .2s,box-shadow .2s;box-shadow:0 4px 24px rgba(0,0,0,.4)}
+.dropZone:hover{border-color:rgba(56,189,248,.45);background:rgba(14,165,233,.08);transform:translateY(-3px);box-shadow:0 12px 40px rgba(14,165,233,.12)}
 .dropZone.dragover{border-color:#0ea5e9;background:rgba(14,165,233,.12)}
-.dropZone.loaded{border-color:#22c55e;background:rgba(34,197,94,.08)}
-.dropZone .dzIcon{font-size:30px;margin-bottom:10px}
-.dropZone .dzTitle{font-weight:800;font-size:14px;margin-bottom:4px}
-.dropZone .dzSub{font-size:11.5px;color:var(--muted);line-height:1.4}
-.dropZone .dzStatus{margin-top:10px;font-size:11.5px;color:#7dd3fc;font-weight:700;min-height:16px}
+.dropZone.loaded{border-color:rgba(34,197,94,.45);background:rgba(34,197,94,.06)}
+.dropZone .dzIcon{font-size:34px;margin-bottom:12px;display:block}
+.dropZone .dzTitle{font-weight:800;font-size:15px;margin-bottom:6px;color:#e5eefb}
+.dropZone .dzSub{font-size:11px;color:#4a6a8a;line-height:1.5}
+.dropZone .dzStatus{margin-top:12px;font-size:11px;color:#7dd3fc;font-weight:700;min-height:16px}
 .dropZone input[type=file]{position:absolute;inset:0;opacity:0;cursor:pointer}
-.dropZone .dzOptional{display:inline-block;margin-top:8px;font-size:10px;color:var(--muted);background:#0c1726;border:1px solid var(--line);border-radius:999px;padding:3px 9px}
-.landingActions{margin-top:30px;display:flex;gap:12px;align-items:center}
-.landingActions button{width:auto;margin:0}
+.dropZone .dzOptional{display:inline-block;margin-top:10px;font-size:10px;color:#3a5a7a;background:rgba(56,189,248,.06);border:1px solid rgba(56,189,248,.12);border-radius:999px;padding:3px 10px}
+.dropZone.loaded .dzOptional{color:#4ade80;border-color:rgba(34,197,94,.25)}
+.landingActions{margin-top:36px;display:flex;gap:12px;align-items:center}
+.landingActions button{width:auto;margin:0;padding:12px 28px;font-size:13px}
 .landingSkip{background:transparent;border:1px solid var(--line);color:var(--muted)}
 .landingSkip:hover{background:#101d31;color:#e5eefb}
 </style>
@@ -129,8 +132,8 @@ main{position:absolute;inset:0;overflow:hidden}canvas{display:block;width:100%;h
 
 <!-- ===== Landing / drag-drop screen ===== -->
 <div class="landing" id="landingScreen">
-  <h1>GRM Survey · BUMA Haul Validation Tool</h1>
-  <div class="sub">Drop your files in to get started, or skip straight to the 3D view and import later from the side panels. Each file's date is read automatically (from the PDF's printed date, or the filename) — strings are only ever checked against the BUMA PDF for the <b>same date</b>. Everything below is optional and can be added or changed at any time.</div>
+  <div class="landing-logo">GRM Survey · Goonyella Riverside Mine</div>
+  <h1>BUMA Haul <span>Validation</span> Tool</h1>
   <div class="dropGrid">
     <div class="dropZone" id="dz-arch">
       <input id="landingArchInput" type="file" multiple accept=".arch_d,.txt,.csv,*/*">
@@ -159,7 +162,6 @@ main{position:absolute;inset:0;overflow:hidden}canvas{display:block;width:100%;h
   </div>
   <div class="landingActions">
     <button class="primary" id="landingContinueBtn">Continue to 3D view</button>
-    <button class="landingSkip" id="landingSkipBtn">Skip for now</button>
   </div>
 </div>
 
@@ -4326,7 +4328,7 @@ function closeAllPanels(except){
     landing.classList.add('hidden');
   }
   document.getElementById('landingContinueBtn').addEventListener('click',dismissLanding);
-  document.getElementById('landingSkipBtn').addEventListener('click',dismissLanding);
+  if(document.getElementById('landingSkipBtn'))document.getElementById('landingSkipBtn').addEventListener('click',dismissLanding);
 })();
 
 function startApp(){
